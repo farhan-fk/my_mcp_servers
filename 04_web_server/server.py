@@ -1,5 +1,5 @@
 """
-Web Tools MCP Server
+Web Tools REST API Server
 Web scraping, URL operations, and HTTP utilities
 """
 import os
@@ -7,33 +7,65 @@ import re
 import requests
 from typing import Dict, List
 from urllib.parse import urlparse, urljoin
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+import time
 
 try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
 
-port = int(os.getenv("PORT", 8004))
-mcp = FastMCP("web_tools", host="0.0.0.0", port=port)
+port = int(os.getenv("PORT", 8000))
+app = FastAPI(title="Web Tools API", version="1.0")
 
 
-@mcp.tool()
-def fetch_webpage(url: str, timeout: int = 10) -> Dict:
-    """
-    Fetch the content of a webpage.
-    
-    Use this to retrieve HTML content, check page accessibility, or download web pages.
-    
-    Args:
-        url: The URL to fetch
-        timeout: Request timeout in seconds (default: 10)
-    
-    Returns:
-        Dictionary with status_code, content, headers, and metadata
-    """
+# Request Models
+class FetchWebpageRequest(BaseModel):
+    url: str
+    timeout: int = 10
+
+class URLRequest(BaseModel):
+    url: str
+    timeout: int = 5
+
+class ExtractLinksRequest(BaseModel):
+    url: str
+    filter_external: bool = False
+
+class ScrapeWebpageRequest(BaseModel):
+    url: str
+    css_selector: str = None
+
+class CheckMultipleURLsRequest(BaseModel):
+    urls: List[str]
+    timeout: int = 5
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Web Tools API",
+        "version": "1.0",
+        "tools": [
+            "fetch_webpage", "check_url_status", "extract_links",
+            "scrape_webpage", "extract_metadata", "parse_url",
+            "download_file_info", "check_multiple_urls"
+        ]
+    }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+@app.post("/tools/fetch_webpage")
+async def fetch_webpage(request: FetchWebpageRequest) -> Dict:
+    """Fetch the content of a webpage."""
     try:
-        response = requests.get(url, timeout=timeout, headers={
+        response = requests.get(request.url, timeout=request.timeout, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
@@ -53,76 +85,53 @@ def fetch_webpage(url: str, timeout: int = 10) -> Dict:
         return {'success': False, 'error': str(e)}
 
 
-@mcp.tool()
-def check_url_status(url: str, timeout: int = 5) -> Dict:
-    """
-    Check if a URL is accessible and get its HTTP status.
-    
-    Use this to verify links, check website availability, or validate URLs before processing.
-    
-    Args:
-        url: The URL to check
-        timeout: Request timeout in seconds (default: 5)
-    
-    Returns:
-        Dictionary with status_code, accessible status, and response time
-    """
+@app.post("/tools/check_url_status")
+async def check_url_status(request: URLRequest) -> Dict:
+    """Check if a URL is accessible and get its HTTP status."""
     try:
-        import time
         start_time = time.time()
         
-        response = requests.head(url, timeout=timeout, allow_redirects=True, headers={
+        response = requests.head(request.url, timeout=request.timeout, allow_redirects=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
         response_time = time.time() - start_time
         
         return {
-            'url': url,
+            'url': request.url,
             'accessible': True,
             'status_code': response.status_code,
             'status_message': response.reason,
             'response_time_seconds': round(response_time, 3),
             'final_url': response.url,
-            'redirected': response.url != url
+            'redirected': response.url != request.url
         }
         
     except requests.exceptions.Timeout:
-        return {'url': url, 'accessible': False, 'error': 'Timeout'}
+        return {'url': request.url, 'accessible': False, 'error': 'Timeout'}
     except requests.exceptions.RequestException as e:
-        return {'url': url, 'accessible': False, 'error': str(e)}
+        return {'url': request.url, 'accessible': False, 'error': str(e)}
 
 
-@mcp.tool()
-def extract_links(url: str, filter_external: bool = False) -> Dict:
-    """
-    Extract all links from a webpage.
-    
-    Use this to discover page structure, find related pages, or build web crawlers.
-    
-    Args:
-        url: The webpage URL to extract links from
-        filter_external: If True, only return links from the same domain (default: False)
-    
-    Returns:
-        Dictionary with lists of internal and external links
-    """
+@app.post("/tools/extract_links")
+async def extract_links(request: ExtractLinksRequest) -> Dict:
+    """Extract all links from a webpage."""
     if not BeautifulSoup:
-        return {'error': 'BeautifulSoup4 library not installed'}
+        raise HTTPException(status_code=500, detail='BeautifulSoup4 library not installed')
     
     try:
-        response = requests.get(url, timeout=10, headers={
+        response = requests.get(request.url, timeout=10, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        base_domain = urlparse(url).netloc
+        base_domain = urlparse(request.url).netloc
         internal_links = []
         external_links = []
         
         for link in soup.find_all('a', href=True):
             href = link['href']
-            absolute_url = urljoin(url, href)
+            absolute_url = urljoin(request.url, href)
             
             # Parse the link
             parsed = urlparse(absolute_url)
@@ -133,48 +142,36 @@ def extract_links(url: str, filter_external: bool = False) -> Dict:
                 external_links.append(absolute_url)
         
         result = {
-            'url': url,
+            'url': request.url,
             'total_links': len(internal_links) + len(external_links),
             'internal_links': list(set(internal_links)),
             'external_links': list(set(external_links))
         }
         
-        if filter_external:
+        if request.filter_external:
             result['links'] = result['internal_links']
         
         return result
         
     except Exception as e:
-        return {'error': f'Failed to extract links: {str(e)}'}
+        raise HTTPException(status_code=500, detail=f'Failed to extract links: {str(e)}')
 
 
-@mcp.tool()
-def scrape_webpage(url: str, css_selector: str = None) -> Dict:
-    """
-    Scrape specific content from a webpage using CSS selectors.
-    
-    Use this to extract structured data, parse specific elements, or collect information
-    from web pages. If no selector provided, returns page title and main text.
-    
-    Args:
-        url: The webpage URL to scrape
-        css_selector: CSS selector to target specific elements (optional)
-    
-    Returns:
-        Dictionary with scraped content
-    """
+@app.post("/tools/scrape_webpage")
+async def scrape_webpage(request: ScrapeWebpageRequest) -> Dict:
+    """Scrape specific content from a webpage using CSS selectors."""
     if not BeautifulSoup:
-        return {'error': 'BeautifulSoup4 library not installed'}
+        raise HTTPException(status_code=500, detail='BeautifulSoup4 library not installed')
     
     try:
-        response = requests.get(url, timeout=10, headers={
+        response = requests.get(request.url, timeout=10, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        if css_selector:
+        if request.css_selector:
             # Scrape specific elements
-            elements = soup.select(css_selector)
+            elements = soup.select(request.css_selector)
             results = []
             
             for elem in elements[:50]:  # Limit to 50 elements
@@ -184,8 +181,8 @@ def scrape_webpage(url: str, css_selector: str = None) -> Dict:
                 })
             
             return {
-                'url': url,
-                'selector': css_selector,
+                'url': request.url,
+                'selector': request.css_selector,
                 'count': len(results),
                 'elements': results
             }
@@ -200,40 +197,30 @@ def scrape_webpage(url: str, css_selector: str = None) -> Dict:
             text = soup.get_text(separator='\n', strip=True)
             
             return {
-                'url': url,
+                'url': request.url,
                 'title': title,
                 'text': text[:5000],  # Limit to first 5000 chars
                 'text_length': len(text)
             }
         
     except Exception as e:
-        return {'error': f'Failed to scrape webpage: {str(e)}'}
+        raise HTTPException(status_code=500, detail=f'Failed to scrape webpage: {str(e)}')
 
 
-@mcp.tool()
-def extract_metadata(url: str) -> Dict:
-    """
-    Extract metadata from a webpage (title, description, Open Graph tags, etc.).
-    
-    Use this to get page information for previews, SEO analysis, or content categorization.
-    
-    Args:
-        url: The webpage URL to analyze
-    
-    Returns:
-        Dictionary with page title, description, and meta tags
-    """
+@app.post("/tools/extract_metadata")
+async def extract_metadata(request: URLRequest) -> Dict:
+    """Extract metadata from a webpage (title, description, Open Graph tags, etc.)."""
     if not BeautifulSoup:
-        return {'error': 'BeautifulSoup4 library not installed'}
+        raise HTTPException(status_code=500, detail='BeautifulSoup4 library not installed')
     
     try:
-        response = requests.get(url, timeout=10, headers={
+        response = requests.get(request.url, timeout=10, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         soup = BeautifulSoup(response.text, 'html.parser')
         
         metadata = {
-            'url': url,
+            'url': request.url,
             'title': soup.title.string if soup.title else None,
             'description': None,
             'keywords': None,
@@ -274,24 +261,14 @@ def extract_metadata(url: str) -> Dict:
         return metadata
         
     except Exception as e:
-        return {'error': f'Failed to extract metadata: {str(e)}'}
+        raise HTTPException(status_code=500, detail=f'Failed to extract metadata: {str(e)}')
 
 
-@mcp.tool()
-def parse_url(url: str) -> Dict:
-    """
-    Parse a URL into its components (scheme, domain, path, query, etc.).
-    
-    Use this to analyze URLs, extract parameters, or validate URL structure.
-    
-    Args:
-        url: The URL to parse
-    
-    Returns:
-        Dictionary with URL components
-    """
+@app.post("/tools/parse_url")
+async def parse_url(request: URLRequest) -> Dict:
+    """Parse a URL into its components (scheme, domain, path, query, etc.)."""
     try:
-        parsed = urlparse(url)
+        parsed = urlparse(request.url)
         
         # Parse query parameters
         query_params = {}
@@ -302,7 +279,7 @@ def parse_url(url: str) -> Dict:
                     query_params[key] = value
         
         return {
-            'url': url,
+            'url': request.url,
             'scheme': parsed.scheme,
             'domain': parsed.netloc,
             'path': parsed.path,
@@ -313,24 +290,14 @@ def parse_url(url: str) -> Dict:
         }
         
     except Exception as e:
-        return {'error': f'Failed to parse URL: {str(e)}'}
+        raise HTTPException(status_code=500, detail=f'Failed to parse URL: {str(e)}')
 
 
-@mcp.tool()
-def download_file_info(url: str) -> Dict:
-    """
-    Get information about a downloadable file without downloading it.
-    
-    Use this to check file size, type, and availability before downloading.
-    
-    Args:
-        url: The file URL
-    
-    Returns:
-        Dictionary with file size, content type, and availability
-    """
+@app.post("/tools/download_file_info")
+async def download_file_info(request: URLRequest) -> Dict:
+    """Get information about a downloadable file without downloading it."""
     try:
-        response = requests.head(url, timeout=10, allow_redirects=True, headers={
+        response = requests.head(request.url, timeout=10, allow_redirects=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
@@ -338,7 +305,7 @@ def download_file_info(url: str) -> Dict:
         content_type = response.headers.get('Content-Type')
         
         return {
-            'url': url,
+            'url': request.url,
             'accessible': response.status_code == 200,
             'status_code': response.status_code,
             'content_type': content_type,
@@ -348,28 +315,17 @@ def download_file_info(url: str) -> Dict:
         }
         
     except Exception as e:
-        return {'error': f'Failed to get file info: {str(e)}'}
+        raise HTTPException(status_code=500, detail=f'Failed to get file info: {str(e)}')
 
 
-@mcp.tool()
-def check_multiple_urls(urls: List[str], timeout: int = 5) -> List[Dict]:
-    """
-    Check the status of multiple URLs at once.
-    
-    Use this to validate multiple links, check site availability, or audit URL lists.
-    
-    Args:
-        urls: List of URLs to check
-        timeout: Timeout per URL in seconds (default: 5)
-    
-    Returns:
-        List of dictionaries with status for each URL
-    """
+@app.post("/tools/check_multiple_urls")
+async def check_multiple_urls(request: CheckMultipleURLsRequest) -> List[Dict]:
+    """Check the status of multiple URLs at once."""
     results = []
     
-    for url in urls[:50]:  # Limit to 50 URLs
+    for url in request.urls[:50]:  # Limit to 50 URLs
         try:
-            response = requests.head(url, timeout=timeout, allow_redirects=True, headers={
+            response = requests.head(url, timeout=request.timeout, allow_redirects=True, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             results.append({
@@ -388,8 +344,15 @@ def check_multiple_urls(urls: List[str], timeout: int = 5) -> List[Dict]:
 
 
 if __name__ == "__main__":
-    print(f"Starting Web Tools MCP Server on port {port}...")
-    print("Available tools: fetch_webpage, check_url_status, extract_links,")
-    print("                 scrape_webpage, extract_metadata, parse_url,")
-    print("                 download_file_info, check_multiple_urls")
-    mcp.run()
+    print(f"Starting Web Tools REST API Server on port {port}...")
+    print("Available endpoints:")
+    print("  POST /tools/fetch_webpage")
+    print("  POST /tools/check_url_status")
+    print("  POST /tools/extract_links")
+    print("  POST /tools/scrape_webpage")
+    print("  POST /tools/extract_metadata")
+    print("  POST /tools/parse_url")
+    print("  POST /tools/download_file_info")
+    print("  POST /tools/check_multiple_urls")
+    
+    uvicorn.run(app, host="0.0.0.0", port=port)
