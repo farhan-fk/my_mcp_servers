@@ -48,14 +48,7 @@ This package contains **4 specialized servers**, each focused on a specific doma
 - `download_file_info` - Get file info
 - `check_multiple_urls` - Batch URL checking
 
-## 🎯 Why Separate Servers?
 
-| Aspect | Single Mega Server | 4 Specialized Servers ✅ |
-|--------|-------------------|--------------------------|
-| LLM Tool Selection Accuracy | 65-75% | **90-95%** |
-| Context Window Usage | High (bloated) | **Low (efficient)** |
-| Tool Discovery | All 30+ tools | **Only 4-10 relevant** |
-| Maintenance | Difficult | **Easy per domain** |
 
 ## 🚀 Quick Deploy to Railway
 
