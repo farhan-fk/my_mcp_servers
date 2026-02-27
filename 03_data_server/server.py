@@ -1,5 +1,5 @@
 """
-Data Tools MCP Server
+Data Tools REST API Server
 Data validation, cleaning, transformation, and analysis tools
 """
 import os
@@ -8,88 +8,117 @@ import json
 import csv
 from typing import Dict, List, Any
 from io import StringIO
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
 
-port = int(os.getenv("PORT", 8003))
-mcp = FastMCP("data_tools", host="0.0.0.0", port=port)
+# Get port from environment
+port = int(os.getenv("PORT", 8000))
+
+app = FastAPI(title="Data Tools API", version="1.0")
 
 
-@mcp.tool()
-def validate_email(email: str) -> Dict:
-    """
-    Validate if an email address is properly formatted.
-    
-    Use this to check email validity before sending messages or storing contact info.
-    
-    Args:
-        email: The email address to validate
-    
-    Returns:
-        Dictionary with 'valid' boolean and 'message' explaining result
-    """
+# Request/Response Models
+class EmailValidationRequest(BaseModel):
+    email: str
+
+class URLValidationRequest(BaseModel):
+    url: str
+
+class PhoneValidationRequest(BaseModel):
+    phone: str
+    country_code: str = "US"
+
+class CSVToJSONRequest(BaseModel):
+    csv_data: str
+    has_header: bool = True
+
+class JSONToCSVRequest(BaseModel):
+    json_data: str
+
+class CleanStringRequest(BaseModel):
+    text: str
+    lowercase: bool = False
+    remove_punctuation: bool = False
+    remove_numbers: bool = False
+    trim: bool = True
+
+class DetectDataTypeRequest(BaseModel):
+    value: str
+
+class FindDuplicatesRequest(BaseModel):
+    items: List[str]
+
+class NormalizeWhitespaceRequest(BaseModel):
+    text: str
+
+class CalculateStatisticsRequest(BaseModel):
+    numbers: List[float]
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Data Tools API",
+        "version": "1.0",
+        "tools": [
+            "validate_email", "validate_url", "validate_phone",
+            "csv_to_json", "json_to_csv", "clean_string",
+            "detect_data_type", "find_duplicates",
+            "normalize_whitespace", "calculate_statistics"
+        ]
+    }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+@app.post("/tools/validate_email")
+async def validate_email(request: EmailValidationRequest) -> Dict:
+    """Validate if an email address is properly formatted."""
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    is_valid = bool(re.match(pattern, email))
+    is_valid = bool(re.match(pattern, request.email))
     
     return {
         'valid': is_valid,
-        'email': email,
+        'email': request.email,
         'message': 'Valid email format' if is_valid else 'Invalid email format'
     }
 
 
-@mcp.tool()
-def validate_url(url: str) -> Dict:
-    """
-    Validate if a URL is properly formatted.
-    
-    Use this to check URL validity before making requests or storing links.
-    
-    Args:
-        url: The URL to validate
-    
-    Returns:
-        Dictionary with 'valid' boolean, URL components, and validation message
-    """
+@app.post("/tools/validate_url")
+async def validate_url(request: URLValidationRequest) -> Dict:
+    """Validate if a URL is properly formatted."""
     pattern = r'^https?://[^\s<>"{}|\\^`\[\]]+'
-    is_valid = bool(re.match(pattern, url))
+    is_valid = bool(re.match(pattern, request.url))
     
     result = {
         'valid': is_valid,
-        'url': url,
+        'url': request.url,
         'message': 'Valid URL format' if is_valid else 'Invalid URL format'
     }
     
     if is_valid:
-        # Extract components
-        result['protocol'] = 'https' if url.startswith('https') else 'http'
-        result['domain'] = url.split('/')[2] if len(url.split('/')) > 2 else ''
+        result['protocol'] = 'https' if request.url.startswith('https') else 'http'
+        result['domain'] = request.url.split('/')[2] if len(request.url.split('/')) > 2 else ''
     
     return result
 
 
-@mcp.tool()
-def validate_phone(phone: str, country_code: str = "US") -> Dict:
-    """
-    Validate if a phone number is properly formatted.
-    
-    Use this to check phone number validity before storing or processing contact info.
-    
-    Args:
-        phone: The phone number to validate
-        country_code: Country code for validation (default: "US")
-    
-    Returns:
-        Dictionary with 'valid' boolean and 'message'
-    """
+@app.post("/tools/validate_phone")
+async def validate_phone(request: PhoneValidationRequest) -> Dict:
+    """Validate if a phone number is properly formatted."""
     # Remove common separators
-    cleaned = re.sub(r'[\s\-\(\)\.]+', '', phone)
+    cleaned = re.sub(r'[\s\-\(\)\.]+', '', request.phone)
     
     # Basic validation for US numbers (10 digits)
-    if country_code == "US":
+    if request.country_code == "US":
         is_valid = bool(re.match(r'^\+?1?\d{10}$', cleaned))
         return {
             'valid': is_valid,
-            'phone': phone,
+            'phone': request.phone,
             'cleaned': cleaned,
             'message': 'Valid US phone number' if is_valid else 'Invalid US phone number (need 10 digits)'
         }
@@ -98,35 +127,24 @@ def validate_phone(phone: str, country_code: str = "US") -> Dict:
         is_valid = bool(re.match(r'^\+?\d{7,15}$', cleaned))
         return {
             'valid': is_valid,
-            'phone': phone,
+            'phone': request.phone,
             'cleaned': cleaned,
             'message': 'Valid phone format' if is_valid else 'Invalid phone format'
         }
 
 
-@mcp.tool()
-def csv_to_json(csv_data: str, has_header: bool = True) -> str:
-    """
-    Convert CSV data to JSON format.
-    
-    Use this to transform CSV data into JSON for API consumption or data processing.
-    
-    Args:
-        csv_data: CSV data as a string
-        has_header: Whether the first row contains headers (default: True)
-    
-    Returns:
-        JSON string representation of the CSV data
-    """
+@app.post("/tools/csv_to_json")
+async def csv_to_json(request: CSVToJSONRequest) -> str:
+    """Convert CSV data to JSON format."""
     try:
-        csv_file = StringIO(csv_data)
+        csv_file = StringIO(request.csv_data)
         reader = csv.reader(csv_file)
         
         rows = list(reader)
         if not rows:
             return json.dumps({"error": "No data provided"})
         
-        if has_header:
+        if request.has_header:
             headers = rows[0]
             data = []
             for row in rows[1:]:
@@ -141,21 +159,11 @@ def csv_to_json(csv_data: str, has_header: bool = True) -> str:
         return json.dumps({"error": f"Failed to convert CSV: {str(e)}"})
 
 
-@mcp.tool()
-def json_to_csv(json_data: str) -> str:
-    """
-    Convert JSON array to CSV format.
-    
-    Use this to transform JSON data into CSV for spreadsheet import or reporting.
-    
-    Args:
-        json_data: JSON string (must be an array of objects)
-    
-    Returns:
-        CSV formatted string
-    """
+@app.post("/tools/json_to_csv")
+async def json_to_csv(request: JSONToCSVRequest) -> str:
+    """Convert JSON array to CSV format."""
     try:
-        data = json.loads(json_data)
+        data = json.loads(request.json_data)
         
         if not isinstance(data, list) or not data:
             return "Error: JSON must be a non-empty array of objects"
@@ -182,36 +190,21 @@ def json_to_csv(json_data: str) -> str:
         return f"Error converting JSON to CSV: {str(e)}"
 
 
-@mcp.tool()
-def clean_string(text: str, lowercase: bool = False, remove_punctuation: bool = False, 
-                 remove_numbers: bool = False, trim: bool = True) -> str:
-    """
-    Clean and normalize string data with various options.
+@app.post("/tools/clean_string")
+async def clean_string(request: CleanStringRequest) -> str:
+    """Clean and normalize string data with various options."""
+    result = request.text
     
-    Use this to prepare text data for analysis, comparison, or storage.
-    
-    Args:
-        text: The text to clean
-        lowercase: Convert to lowercase (default: False)
-        remove_punctuation: Remove punctuation marks (default: False)
-        remove_numbers: Remove numeric characters (default: False)
-        trim: Remove leading/trailing whitespace (default: True)
-    
-    Returns:
-        Cleaned string
-    """
-    result = text
-    
-    if trim:
+    if request.trim:
         result = result.strip()
     
-    if lowercase:
+    if request.lowercase:
         result = result.lower()
     
-    if remove_punctuation:
+    if request.remove_punctuation:
         result = re.sub(r'[^\w\s]', '', result)
     
-    if remove_numbers:
+    if request.remove_numbers:
         result = re.sub(r'\d+', '', result)
     
     # Normalize whitespace
@@ -220,20 +213,10 @@ def clean_string(text: str, lowercase: bool = False, remove_punctuation: bool = 
     return result.strip()
 
 
-@mcp.tool()
-def detect_data_type(value: str) -> Dict:
-    """
-    Detect the data type of a string value (number, email, url, date, etc.).
-    
-    Use this to automatically classify and validate data fields.
-    
-    Args:
-        value: The string value to analyze
-    
-    Returns:
-        Dictionary with detected type and confidence
-    """
-    value = value.strip()
+@app.post("/tools/detect_data_type")
+async def detect_data_type(request: DetectDataTypeRequest) -> Dict:
+    """Detect the data type of a string value."""
+    value = request.value.strip()
     
     # Check for empty
     if not value:
@@ -275,26 +258,16 @@ def detect_data_type(value: str) -> Dict:
     return {'type': 'string', 'confidence': 'high', 'value': value}
 
 
-@mcp.tool()
-def find_duplicates(items: List[str]) -> Dict:
-    """
-    Find duplicate values in a list.
-    
-    Use this to identify repeated entries in data sets or validate uniqueness.
-    
-    Args:
-        items: List of strings to check for duplicates
-    
-    Returns:
-        Dictionary with duplicates, their counts, and statistics
-    """
+@app.post("/tools/find_duplicates")
+async def find_duplicates(request: FindDuplicatesRequest) -> Dict:
+    """Find duplicate values in a list."""
     from collections import Counter
     
-    counts = Counter(items)
+    counts = Counter(request.items)
     duplicates = {item: count for item, count in counts.items() if count > 1}
     
     return {
-        'total_items': len(items),
+        'total_items': len(request.items),
         'unique_items': len(counts),
         'duplicate_count': len(duplicates),
         'duplicates': duplicates,
@@ -302,50 +275,30 @@ def find_duplicates(items: List[str]) -> Dict:
     }
 
 
-@mcp.tool()
-def normalize_whitespace(text: str) -> str:
-    """
-    Normalize all whitespace in text to single spaces.
-    
-    Use this to clean data from various sources with inconsistent spacing.
-    
-    Args:
-        text: Text with irregular whitespace
-    
-    Returns:
-        Text with normalized spacing
-    """
+@app.post("/tools/normalize_whitespace")
+async def normalize_whitespace(request: NormalizeWhitespaceRequest) -> str:
+    """Normalize all whitespace in text to single spaces."""
     # Replace all whitespace (spaces, tabs, newlines) with single space
-    normalized = re.sub(r'\s+', ' ', text)
+    normalized = re.sub(r'\s+', ' ', request.text)
     return normalized.strip()
 
 
-@mcp.tool()
-def calculate_statistics(numbers: List[float]) -> Dict:
-    """
-    Calculate basic statistics for a list of numbers.
-    
-    Use this for quick data analysis and numerical summaries.
-    
-    Args:
-        numbers: List of numbers to analyze
-    
-    Returns:
-        Dictionary with mean, median, min, max, sum, and count
-    """
-    if not numbers:
+@app.post("/tools/calculate_statistics")
+async def calculate_statistics(request: CalculateStatisticsRequest) -> Dict:
+    """Calculate basic statistics for a list of numbers."""
+    if not request.numbers:
         return {'error': 'Empty list provided'}
     
-    sorted_numbers = sorted(numbers)
-    n = len(numbers)
+    sorted_numbers = sorted(request.numbers)
+    n = len(request.numbers)
     
     result = {
         'count': n,
-        'sum': sum(numbers),
-        'mean': sum(numbers) / n,
-        'min': min(numbers),
-        'max': max(numbers),
-        'range': max(numbers) - min(numbers)
+        'sum': sum(request.numbers),
+        'mean': sum(request.numbers) / n,
+        'min': min(request.numbers),
+        'max': max(request.numbers),
+        'range': max(request.numbers) - min(request.numbers)
     }
     
     # Calculate median
@@ -358,8 +311,17 @@ def calculate_statistics(numbers: List[float]) -> Dict:
 
 
 if __name__ == "__main__":
-    print(f"Starting Data Tools MCP Server on port {port}...")
-    print("Available tools: validate_email, validate_url, validate_phone,")
-    print("                 csv_to_json, json_to_csv, clean_string, detect_data_type,")
-    print("                 find_duplicates, normalize_whitespace, calculate_statistics")
-    mcp.run()
+    print(f"Starting Data Tools REST API Server on port {port}...")
+    print("Available endpoints:")
+    print("  POST /tools/validate_email")
+    print("  POST /tools/validate_url")
+    print("  POST /tools/validate_phone")
+    print("  POST /tools/csv_to_json")
+    print("  POST /tools/json_to_csv")
+    print("  POST /tools/clean_string")
+    print("  POST /tools/detect_data_type")
+    print("  POST /tools/find_duplicates")
+    print("  POST /tools/normalize_whitespace")
+    print("  POST /tools/calculate_statistics")
+    
+    uvicorn.run(app, host="0.0.0.0", port=port)
