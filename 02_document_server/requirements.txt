@@ -1,0 +1,6 @@
+PyPDF2
+pdfplumber
+requests
+python-dotenv
+mcp[cli]
+fastmcp
