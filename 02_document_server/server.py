@@ -1,5 +1,5 @@
 """
-Document Tools MCP Server
+Document Tools REST API Server
 PDF processing, text extraction, OCR, and document analysis tools
 """
 import os
@@ -7,7 +7,9 @@ import re
 import requests
 from typing import Dict, List
 from io import BytesIO
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
 
 try:
     import PyPDF2
@@ -19,26 +21,50 @@ try:
 except ImportError:
     pdfplumber = None
 
-port = int(os.getenv("PORT", 8002))
-mcp = FastMCP("document_tools", host="0.0.0.0", port=port)
+port = int(os.getenv("PORT", 8000))
+app = FastAPI(title="Document Tools API", version="1.0")
 
 
-@mcp.tool()
-def extract_text_from_pdf(pdf_url: str) -> str:
-    """
-    Extract all text content from a PDF file.
-    
-    Use this when you need to read text from PDF documents, extract content
-    for analysis, or convert PDFs to plain text format.
-    
-    Args:
-        pdf_url: Direct URL to the PDF file (must be publicly accessible)
-    
-    Returns:
-        Extracted text content with preserved line breaks
-    """
+# Request Models
+class PDFURLRequest(BaseModel):
+    pdf_url: str
+
+class ExtractTablesRequest(BaseModel):
+    pdf_url: str
+    page_number: int = None
+
+class CleanTextRequest(BaseModel):
+    text: str
+    remove_extra_spaces: bool = True
+    remove_special_chars: bool = False
+
+class TextRequest(BaseModel):
+    text: str
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Document Tools API",
+        "version": "1.0",
+        "tools": [
+            "extract_text_from_pdf", "extract_tables_from_pdf", "count_pdf_pages",
+            "extract_pdf_metadata", "clean_text", "count_words",
+            "extract_emails_from_text", "extract_urls_from_text"
+        ]
+    }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+@app.post("/tools/extract_text_from_pdf")
+async def extract_text_from_pdf(request: PDFURLRequest) -> Dict:
+    """Extract all text content from a PDF file."""
     try:
-        response = requests.get(pdf_url, timeout=30)
+        response = requests.get(request.pdf_url, timeout=30)
         response.raise_for_status()
         
         pdf_file = BytesIO(response.content)
@@ -48,48 +74,36 @@ def extract_text_from_pdf(pdf_url: str) -> str:
             text = ""
             for page in reader.pages:
                 text += page.extract_text() + "\n\n"
-            return text.strip()
+            return {"text": text.strip()}
         else:
-            return "Error: PyPDF2 library not installed"
+            raise HTTPException(status_code=500, detail="PyPDF2 library not installed")
             
     except Exception as e:
-        return f"Error extracting text from PDF: {str(e)}"
+        raise HTTPException(status_code=500, detail=f"Error extracting text from PDF: {str(e)}")
 
 
-@mcp.tool()
-def extract_tables_from_pdf(pdf_url: str, page_number: int = None) -> List[Dict]:
-    """
-    Extract tables from a PDF file as structured data.
-    
-    Use this when you need to get tabular data from PDFs, such as
-    financial reports, research data tables, or statistical information.
-    
-    Args:
-        pdf_url: Direct URL to the PDF file
-        page_number: Specific page number to extract from (optional, 1-indexed)
-    
-    Returns:
-        List of tables as dictionaries with headers and rows
-    """
+@app.post("/tools/extract_tables_from_pdf")
+async def extract_tables_from_pdf(request: ExtractTablesRequest) -> List[Dict]:
+    """Extract tables from a PDF file as structured data."""
     try:
         if not pdfplumber:
-            return [{"error": "pdfplumber library not installed"}]
+            raise HTTPException(status_code=500, detail="pdfplumber library not installed")
         
-        response = requests.get(pdf_url, timeout=30)
+        response = requests.get(request.pdf_url, timeout=30)
         response.raise_for_status()
         
         pdf_file = BytesIO(response.content)
         tables_data = []
         
         with pdfplumber.open(pdf_file) as pdf:
-            pages = [pdf.pages[page_number - 1]] if page_number else pdf.pages
+            pages = [pdf.pages[request.page_number - 1]] if request.page_number else pdf.pages
             
             for i, page in enumerate(pages):
                 tables = page.extract_tables()
                 for j, table in enumerate(tables):
                     if table:
                         tables_data.append({
-                            'page': page_number if page_number else i + 1,
+                            'page': request.page_number if request.page_number else i + 1,
                             'table_index': j + 1,
                             'headers': table[0] if table else [],
                             'rows': table[1:] if len(table) > 1 else []
@@ -98,53 +112,33 @@ def extract_tables_from_pdf(pdf_url: str, page_number: int = None) -> List[Dict]
         return tables_data if tables_data else [{"message": "No tables found in PDF"}]
         
     except Exception as e:
-        return [{"error": f"Error extracting tables: {str(e)}"}]
+        raise HTTPException(status_code=500, detail=f"Error extracting tables: {str(e)}")
 
 
-@mcp.tool()
-def count_pdf_pages(pdf_url: str) -> int:
-    """
-    Count the number of pages in a PDF file.
-    
-    Use this to determine PDF length before processing or to validate documents.
-    
-    Args:
-        pdf_url: Direct URL to the PDF file
-    
-    Returns:
-        Number of pages in the PDF
-    """
+@app.post("/tools/count_pdf_pages")
+async def count_pdf_pages(request: PDFURLRequest) -> Dict:
+    """Count the number of pages in a PDF file."""
     try:
-        response = requests.get(pdf_url, timeout=30)
+        response = requests.get(request.pdf_url, timeout=30)
         response.raise_for_status()
         
         pdf_file = BytesIO(response.content)
         
         if PyPDF2:
             reader = PyPDF2.PdfReader(pdf_file)
-            return len(reader.pages)
+            return {"num_pages": len(reader.pages)}
         else:
-            return -1  # Error indicator
+            raise HTTPException(status_code=500, detail="PyPDF2 library not installed")
             
     except Exception as e:
-        return -1
+        raise HTTPException(status_code=500, detail=f"Error counting pages: {str(e)}")
 
 
-@mcp.tool()
-def extract_pdf_metadata(pdf_url: str) -> Dict:
-    """
-    Extract metadata from a PDF file including title, author, creation date, etc.
-    
-    Use this to get information about a PDF document without reading its full content.
-    
-    Args:
-        pdf_url: Direct URL to the PDF file
-    
-    Returns:
-        Dictionary with PDF metadata (title, author, subject, creator, creation_date, etc.)
-    """
+@app.post("/tools/extract_pdf_metadata")
+async def extract_pdf_metadata(request: PDFURLRequest) -> Dict:
+    """Extract metadata from a PDF file including title, author, creation date, etc."""
     try:
-        response = requests.get(pdf_url, timeout=30)
+        response = requests.get(request.pdf_url, timeout=30)
         response.raise_for_status()
         
         pdf_file = BytesIO(response.content)
@@ -164,53 +158,34 @@ def extract_pdf_metadata(pdf_url: str) -> Dict:
             }
             return result
         else:
-            return {"error": "PyPDF2 library not installed"}
+            raise HTTPException(status_code=500, detail="PyPDF2 library not installed")
             
     except Exception as e:
-        return {"error": f"Error extracting metadata: {str(e)}"}
+        raise HTTPException(status_code=500, detail=f"Error extracting metadata: {str(e)}")
 
 
-@mcp.tool()
-def clean_text(text: str, remove_extra_spaces: bool = True, remove_special_chars: bool = False) -> str:
-    """
-    Clean and normalize text by removing extra whitespace and optionally special characters.
+@app.post("/tools/clean_text")
+async def clean_text(request: CleanTextRequest) -> Dict:
+    """Clean and normalize text by removing extra whitespace and optionally special characters."""
+    text = request.text
     
-    Use this to prepare text for analysis, remove formatting artifacts, or standardize text data.
-    
-    Args:
-        text: The text to clean
-        remove_extra_spaces: Remove multiple spaces and normalize whitespace (default: True)
-        remove_special_chars: Remove special characters, keeping only alphanumeric and basic punctuation (default: False)
-    
-    Returns:
-        Cleaned text string
-    """
-    if remove_extra_spaces:
+    if request.remove_extra_spaces:
         # Remove multiple spaces
         text = re.sub(r'\s+', ' ', text)
         # Remove leading/trailing whitespace from lines
         text = '\n'.join(line.strip() for line in text.split('\n'))
     
-    if remove_special_chars:
+    if request.remove_special_chars:
         # Keep alphanumeric, spaces, and basic punctuation
         text = re.sub(r'[^a-zA-Z0-9\s\.,;:!?\-\'\"]', '', text)
     
-    return text.strip()
+    return {"cleaned_text": text.strip()}
 
 
-@mcp.tool()
-def count_words(text: str) -> Dict:
-    """
-    Count words, characters, sentences, and paragraphs in text.
-    
-    Use this for document analysis, content metrics, or readability assessment.
-    
-    Args:
-        text: The text to analyze
-    
-    Returns:
-        Dictionary with word count, character count, sentence count, and paragraph count
-    """
+@app.post("/tools/count_words")
+async def count_words(request: TextRequest) -> Dict:
+    """Count words, characters, sentences, and paragraphs in text."""
+    text = request.text
     words = len(text.split())
     characters = len(text)
     characters_no_spaces = len(text.replace(' ', '').replace('\n', ''))
@@ -227,45 +202,32 @@ def count_words(text: str) -> Dict:
     }
 
 
-@mcp.tool()
-def extract_emails_from_text(text: str) -> List[str]:
-    """
-    Extract all email addresses from text.
-    
-    Use this to find contact information in documents or extract recipient lists.
-    
-    Args:
-        text: The text to search for emails
-    
-    Returns:
-        List of unique email addresses found
-    """
+@app.post("/tools/extract_emails_from_text")
+async def extract_emails_from_text(request: TextRequest) -> Dict:
+    """Extract all email addresses from text."""
     email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    emails = re.findall(email_pattern, text)
-    return list(set(emails))  # Return unique emails
+    emails = re.findall(email_pattern, request.text)
+    return {"emails": list(set(emails))}
 
 
-@mcp.tool()
-def extract_urls_from_text(text: str) -> List[str]:
-    """
-    Extract all URLs from text.
-    
-    Use this to find links in documents, collect references, or analyze web content.
-    
-    Args:
-        text: The text to search for URLs
-    
-    Returns:
-        List of unique URLs found
-    """
+@app.post("/tools/extract_urls_from_text")
+async def extract_urls_from_text(request: TextRequest) -> Dict:
+    """Extract all URLs from text."""
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-    urls = re.findall(url_pattern, text)
-    return list(set(urls))  # Return unique URLs
+    urls = re.findall(url_pattern, request.text)
+    return {"urls": list(set(urls))}
 
 
 if __name__ == "__main__":
-    print(f"Starting Document Tools MCP Server on port {port}...")
-    print("Available tools: extract_text_from_pdf, extract_tables_from_pdf, count_pdf_pages,")
-    print("                 extract_pdf_metadata, clean_text, count_words,")
-    print("                 extract_emails_from_text, extract_urls_from_text")
-    mcp.run()
+    print(f"Starting Document Tools REST API Server on port {port}...")
+    print("Available endpoints:")
+    print("  POST /tools/extract_text_from_pdf")
+    print("  POST /tools/extract_tables_from_pdf")
+    print("  POST /tools/count_pdf_pages")
+    print("  POST /tools/extract_pdf_metadata")
+    print("  POST /tools/clean_text")
+    print("  POST /tools/count_words")
+    print("  POST /tools/extract_emails_from_text")
+    print("  POST /tools/extract_urls_from_text")
+    
+    uvicorn.run(app, host="0.0.0.0", port=port)
